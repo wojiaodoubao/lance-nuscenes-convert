@@ -21,14 +21,46 @@ import argparse
 
 metrics = {}
 
-def convert_nuscenes_to_lance(data_root: str, version: str, lance_root: str):
+
+def compute_schema(nusc: NuScenes, data_root: str, compression_algo="zstd", compression_level="0"):
+    scene = nusc.scene[0]
+    sample_token = scene['first_sample_token']
+    (_, sample_dict) = extend_sample(nusc, sample_token, data_root=data_root)
+
+    data_table = {}
+    for k, v in sample_dict.items():
+        data_table[k] = [v]
+    arrow_table = pa.Table.from_pydict(data_table)
+
+    schema = arrow_table.schema
+    new_fields = []
+    for field in schema:
+        if pa.types.is_binary(field.type):
+            new_field = field.with_metadata(
+                {"lance-encoding:compression": compression_algo, "lance-encoding:compression-level": compression_level})
+            new_fields.append(new_field)
+        else:
+            new_fields.append(field)
+
+    new_schema = pa.schema(new_fields)
+    return new_schema
+
+
+def convert_nuscenes_to_lance(data_root: str, version: str, lance_root: str, compression_algo="zstd",
+                              compression_level="0"):
     """
     Convert nuScenes dataset into pyarrow table.
 
     :param data_root: The root path of nuScenes dataset.
+    :param version: The version of nuScenes dataset.
+    :param lance_root: The root path of lance dataset.
+    :param compression_algo: The compression algorithm.
+    :param compression_level: The lance compression level.
     :return: the converted pyarrow table.
     """
     nusc = NuScenes(version=version, dataroot=data_root, verbose=True)
+    schema = compute_schema(nusc, data_root, compression_algo, compression_level)
+
     data_table = {}
     for scene in nusc.scene:
         update_metric('scene', 1)
@@ -43,12 +75,12 @@ def convert_nuscenes_to_lance(data_root: str, version: str, lance_root: str):
                 data_table[k].append(v)
 
             if get_metric('sample') % 100 == 0:
-                arrow_table = pa.Table.from_pydict(data_table)
+                arrow_table = pa.Table.from_pydict(data_table, schema=schema)
                 lance.write_dataset(arrow_table, lance_root, mode="append")
                 data_table = {}
 
     if len(data_table) > 0:
-        arrow_table = pa.Table.from_pydict(data_table)
+        arrow_table = pa.Table.from_pydict(data_table, schema=schema)
         lance.write_dataset(arrow_table, lance_root, mode="append")
 
     print('Statistics', metrics)
@@ -103,6 +135,12 @@ def extend_file(file_path: str, sensor: str, sample_dict: dict):
         sample_dict[sensor + '-file'] = binary_data
         update_metric('filecount', 1)
         update_metric('filesize', len(binary_data))
+        if file_path.endswith('.pcd'):
+            update_metric('filecount-pcd', 1)
+            update_metric('filesize-pcd', len(binary_data))
+        elif file_path.endswith('.jpg'):
+            update_metric('filecount-jpg', 1)
+            update_metric('filesize-jpg', len(binary_data))
 
 
 def extend_sample_anns(nusc: NuScenes, sample_anns: list, sample_dict: dict):
@@ -173,7 +211,10 @@ if __name__ == '__main__':
     parser.add_argument("nuscenes_root", help="The root path of nuScenes dataset.")
     parser.add_argument("version", help="The nuScenes dataset version.")
     parser.add_argument("lance_root", help="The root path of lance dataset.")
+    parser.add_argument("--compression_algo", help="The compression algorithm of lance dataset.", default="zstd")
+    parser.add_argument("--compression_level", help="The compression level of lance dataset.", default="22")
 
     args = parser.parse_args()
 
-    convert_nuscenes_to_lance(data_root=args.nuscenes_root, version=args.version, lance_root=args.lance_root)
+    convert_nuscenes_to_lance(data_root=args.nuscenes_root, version=args.version, lance_root=args.lance_root,
+                              compression_algo=args.compression_algo, compression_level=args.compression_level)
